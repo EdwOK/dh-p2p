@@ -11,8 +11,8 @@ import sys
 from urllib.parse import quote
 
 from helpers import (
-    MAIN_PORT,
-    MAIN_SERVER,
+    CLOUDS,
+    DEFAULT_CLOUD,
     UDP,
     PTCPPayload,
     get_auth,
@@ -21,10 +21,17 @@ from helpers import (
     get_enc,
     get_key,
     get_nonce,
+    set_cloud,
 )
 
 
-def main(serial, dtype=0, username=None, password=None, debug=False):
+def main(
+    serial, dtype=0, username=None, password=None, debug=False, cloud=DEFAULT_CLOUD
+):
+    # Rebinds the module-level credentials as well, which UDP.request reads.
+    main_server, main_port = set_cloud(cloud)
+    print(f"Using {cloud} cloud: {main_server}:{main_port}")
+
     socketserver = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     socketserver.bind(("0.0.0.0", 554))
     socketserver.listen(5)
@@ -41,7 +48,7 @@ def main(serial, dtype=0, username=None, password=None, debug=False):
             ]
         )
 
-    main_remote = UDP(MAIN_SERVER, MAIN_PORT, debug)
+    main_remote = UDP(main_server, main_port, debug)
     res = main_remote.request("/probe/p2psrv")
 
     res = main_remote.request(f"/online/p2psrv/{serial}")
@@ -75,7 +82,7 @@ def main(serial, dtype=0, username=None, password=None, debug=False):
     relay_server, relay_port = res["data"]["body"]["Address"].split(":")
     relay_port = int(relay_port)
 
-    device_remote = UDP(MAIN_SERVER, MAIN_PORT, debug)
+    device_remote = UDP(main_server, main_port, debug)
 
     laddr = f"127.0.0.1:{device_remote.lport}"
     ipaddr = f"<IpEncrpt>true</IpEncrpt><LocalAddr>{laddr}</LocalAddr>"
@@ -136,8 +143,8 @@ def main(serial, dtype=0, username=None, password=None, debug=False):
     device_remote.rhost = device_server
     device_remote.rport = device_port
 
-    main_remote.rhost = MAIN_SERVER
-    main_remote.rport = MAIN_PORT
+    main_remote.rhost = main_server
+    main_remote.rport = main_port
 
     if dtype > 0:
         auth = get_auth(username, key, nonce, randsalt)
@@ -382,6 +389,13 @@ if __name__ == "__main__":
     parser.add_argument("-t", "--type", type=int, help="Type of the camera", default=0)
     parser.add_argument("-u", "--username", help="Username of the camera")
     parser.add_argument("-p", "--password", help="Password of the camera")
+    parser.add_argument(
+        "-c",
+        "--cloud",
+        choices=sorted(CLOUDS),
+        default=DEFAULT_CLOUD,
+        help="P2P cloud the camera is registered with (default: %(default)s)",
+    )
     args = parser.parse_args()
 
     if args.username is None or args.password is None:
@@ -391,4 +405,11 @@ if __name__ == "__main__":
             parser.error("Username and password are required in debug mode")
 
     if args.serial:
-        main(args.serial, args.type, args.username, args.password, args.debug)
+        main(
+            args.serial,
+            args.type,
+            args.username,
+            args.password,
+            args.debug,
+            args.cloud,
+        )

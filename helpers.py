@@ -16,11 +16,32 @@ import xmltodict
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-MAIN_SERVER = "www.easy4ipcloud.com"
-MAIN_PORT = 8800
+# Cloud endpoints and their client credentials, taken from the official clients.
+# A device is only reachable through the cloud it registered with: Amcrest units
+# are not on easy4ip and answer 404 there, which is what issue #17 ran into.
+CLOUDS = {
+    "easy4ip": {
+        "server": "www.easy4ipcloud.com",
+        "port": 8800,
+        "username": "cba1b29e32cb17aa46b8ff9e73c7f40b",
+        "userkey": "996103384cdf19179e19243e959bbf8b",
+    },
+    "amcrest": {
+        "server": "p2p.amcrestview.com",
+        "port": 8800,
+        "username": "default\\1ee97e027b2140a19b08606dcede9b9e",
+        "userkey": "da16f30fd0af413d97921ce0d24e165c",
+    },
+}
 
-USERNAME = "cba1b29e32cb17aa46b8ff9e73c7f40b"
-USERKEY = "996103384cdf19179e19243e959bbf8b"
+DEFAULT_CLOUD = "easy4ip"
+
+MAIN_SERVER = CLOUDS[DEFAULT_CLOUD]["server"]
+MAIN_PORT = CLOUDS[DEFAULT_CLOUD]["port"]
+
+USERNAME = CLOUDS[DEFAULT_CLOUD]["username"]
+USERKEY = CLOUDS[DEFAULT_CLOUD]["userkey"]
+
 IV = b"2z52*lk9o6HRyJrf"
 
 # The cloud encrypts the <Info> payload of /info/device/{serial} with a fixed
@@ -29,6 +50,25 @@ INFO_KEY = b"kRjmsUB&ezmdGLL67H#$ojw@XflcaIaf"
 INFO_IV = b"MydvJw*Iw1w&i^kk"
 
 CSEQ = 0
+
+
+def set_cloud(name):
+    """
+    Select the cloud to talk to, returning its (server, port)
+
+    UDP.request reads USERNAME / USERKEY off the module, so the credentials are
+    rebound here rather than threaded through every call site.
+    """
+    global MAIN_SERVER, MAIN_PORT, USERNAME, USERKEY
+
+    cloud = CLOUDS[name]
+
+    MAIN_SERVER = cloud["server"]
+    MAIN_PORT = cloud["port"]
+    USERNAME = cloud["username"]
+    USERKEY = cloud["userkey"]
+
+    return MAIN_SERVER, MAIN_PORT
 
 
 def get_device_info(info):

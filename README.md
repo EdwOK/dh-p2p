@@ -68,8 +68,15 @@ To use the script with a device that requires authentication when creating a cha
 
 When running in `--debug` mode or when the `--type` > 0, the `USERNAME` and `PASSWORD` arguments are mandatory. Additionally, make sure that `ffplay` is in the system path when debug mode is enabled.
 
+A device is reachable only through the cloud it registered with. Dahua and derived devices use
+easy4ip, the default; Amcrest devices use their own cloud, selected with `-c amcrest`:
+
+```bash
+python main.py -c amcrest [CAMERA_SERIAL]
+```
+
 ```text
-usage: main.py [-h] [-u USERNAME] [-p PASSWORD] [-d] serial
+usage: main.py [-h] [-d] [-t TYPE] [-u USERNAME] [-p PASSWORD] [-c {amcrest,easy4ip}] serial
 
 positional arguments:
   serial                Serial number of the camera
@@ -81,7 +88,9 @@ options:
   -u USERNAME, --username USERNAME
                         Username of the camera
   -p PASSWORD, --password PASSWORD
-                        Password of the camer
+                        Password of the camera
+  -c {amcrest,easy4ip}, --cloud {amcrest,easy4ip}
+                        P2P cloud the camera is registered with (default: easy4ip)
 ```
 
 ### Limitations
@@ -285,3 +294,4 @@ This project has been inspired and influenced by the following projects and peop
 - [mcw0/PoC](https://github.com/mcw0/PoC): The foundational structure for the handshake and the PTCP protocol.
 - [@p2p-sys](https://github.com/p2p-sys): The idea of inverting the STUN protocol, and finding the salt in the `/info/device` response in #13.
 - [@mlebdd](https://github.com/mlebdd): Identified the `<Info>` payload as AES-OFB in #13.
+- [@tguless](https://github.com/tguless): Supplied the Amcrest cloud endpoints and a test device in #17.
