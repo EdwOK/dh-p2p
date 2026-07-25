@@ -292,6 +292,7 @@ Packet types:
 This project has been inspired and influenced by the following projects and people:
 
 - [mcw0/PoC](https://github.com/mcw0/PoC): The foundational structure for the handshake and the PTCP protocol.
+- [@bpietroiu](https://github.com/bpietroiu): Recovered the easy4ip client credentials from SmartPSSLite in #9.
 - [@p2p-sys](https://github.com/p2p-sys): The idea of inverting the STUN protocol, and finding the salt in the `/info/device` response in #13.
 - [@mlebdd](https://github.com/mlebdd): Identified the `<Info>` payload as AES-OFB in #13.
 - [@tguless](https://github.com/tguless): Supplied the Amcrest cloud endpoints and a test device in #17.

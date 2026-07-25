@@ -196,9 +196,14 @@ def main(
     try:
         data = device_remote.recv(timeout=5)
     except socket.timeout:
+        # Relay mode is Rust-only by design. It routes through the agent server,
+        # which pushes SYN, heartbeat, payload and status unprompted and in any
+        # order. That needs concurrent read/write, a client-initiated heartbeat
+        # and read timeouts -- none of which fit this simplex, blocking script.
+        # A prototype carried RTSP only as far as SETUP; Rust reaches RTP.
         print("Timeout occurred while waiting for a response from the device.")
         print("If the issue persists, you may need to use relay mode with this device.")
-        print("Note: Relay mode is currently not implemented for Python.")
+        print("Note: Relay mode is Rust-only; try: dh-p2p --relay", serial)
         sys.exit(1)
 
     print("Data <<<")
