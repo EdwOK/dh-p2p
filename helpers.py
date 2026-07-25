@@ -21,14 +21,48 @@ MAIN_PORT = 8800
 
 USERNAME = "cba1b29e32cb17aa46b8ff9e73c7f40b"
 USERKEY = "996103384cdf19179e19243e959bbf8b"
-RANDSALT = "5daf91fc5cfc1be8e081cfb08f792726"
 IV = b"2z52*lk9o6HRyJrf"
+
+# The cloud encrypts the <Info> payload of /info/device/{serial} with a fixed
+# key and IV, shared by every device rather than derived per session.
+INFO_KEY = b"kRjmsUB&ezmdGLL67H#$ojw@XflcaIaf"
+INFO_IV = b"MydvJw*Iw1w&i^kk"
 
 CSEQ = 0
 
 
-def get_key(username, password):
-    key = f"{username}:Login to {RANDSALT}:{password}"
+def get_device_info(info):
+    """
+    Decrypt the <Info> payload of /info/device/{serial}
+
+    Returns the device's salt and service ports, e.g.
+
+        {"httpport": 80, "privport": 37777, "randsalt": "5daf91fc...",
+         "rtspport": 554, "tlsprivport": 37778}
+
+    Firmware that does not report its info answers with an empty element; the
+    result is then an empty dict and the device expects no salt.
+    """
+    if not info:
+        return {}
+
+    decryptor = Cipher(
+        algorithms.AES(INFO_KEY), modes.OFB(INFO_IV), backend=default_backend()
+    ).decryptor()
+
+    try:
+        data = decryptor.update(base64.b64decode(info)) + decryptor.finalize()
+        return json.loads(data)
+    except ValueError:
+        # The key above was recovered from an easy4ipcloud capture. A rebranded
+        # cloud may wrap the payload with one of its own, which decrypts to
+        # garbage rather than failing outright.
+        print("Could not decrypt device info, continuing without a salt.")
+        return {}
+
+
+def get_key(username, password, randsalt):
+    key = f"{username}:Login to {randsalt}:{password}"
     return hashlib.md5(key.encode()).hexdigest().upper().encode()
 
 
@@ -60,17 +94,20 @@ def get_dec(key: bytes, nonce: int, data: str):
     return dec.decode()
 
 
-def get_auth(username, key, nonce, payload=""):
+def get_auth(username, key, nonce, randsalt, payload=""):
     curdate = int(time.time())
 
     message = f"{nonce}{curdate}{payload}".encode()
     auth = base64.b64encode(hmac.new(key, message, hashlib.sha256).digest()).decode()
 
+    # Devices that report no salt expect the element to be absent, not empty.
+    salt = f"<RandSalt>{randsalt}</RandSalt>" if randsalt else ""
+
     return (
         f"<CreateDate>{curdate}</CreateDate>"
         f"<DevAuth>{auth}</DevAuth>"
         f"<Nonce>{nonce}</Nonce>"
-        f"<RandSalt>{RANDSALT}</RandSalt>"
+        f"{salt}"
         f"<UserName>{username}</UserName>"
     )
 

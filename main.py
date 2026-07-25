@@ -17,6 +17,7 @@ from helpers import (
     PTCPPayload,
     get_auth,
     get_dec,
+    get_device_info,
     get_enc,
     get_key,
     get_nonce,
@@ -50,8 +51,25 @@ def main(serial, dtype=0, username=None, password=None, debug=False):
 
     p2psrv_remote = UDP(p2psrv_server, p2psrv_port, debug)
     res = p2psrv_remote.request(f"/probe/device/{serial}")
-    res = p2psrv_remote.request(f"/info/device/{serial}")
+    p2psrv_remote.request(f"/info/device/{serial}", should_read=False)
+    res = p2psrv_remote.read(return_error=True)
     p2psrv_remote.close()
+
+    # The salt is only needed to authenticate the channel setup, so a server that
+    # will not answer here must not take the whole handshake down with it.
+    info = {}
+
+    if res["code"] < 300:
+        info = get_device_info(res["data"]["body"].get("Info"))
+    else:
+        print("Could not read device info:", res["status"])
+
+    randsalt = info.get("randsalt", "")
+
+    if randsalt:
+        print(f"Device info: {info}")
+    else:
+        print("Device reported no salt, continuing without one.")
 
     res = main_remote.request("/online/relay")
     relay_server, relay_port = res["data"]["body"]["Address"].split(":")
@@ -65,12 +83,12 @@ def main(serial, dtype=0, username=None, password=None, debug=False):
     aid = random.randbytes(8)
 
     if dtype > 0:
-        key = get_key(username, password)
+        key = get_key(username, password, randsalt)
         nonce = get_nonce()
 
         laddr = get_enc(key, nonce, laddr)
         ipaddr = f"<IpEncrptV2>true</IpEncrptV2><LocalAddr>{laddr}</LocalAddr>"
-        auth = "" if dtype == 0 else get_auth(username, key, nonce, laddr)
+        auth = "" if dtype == 0 else get_auth(username, key, nonce, randsalt, laddr)
 
     res = device_remote.request(
         f"/device/{serial}/p2p-channel",
@@ -122,7 +140,7 @@ def main(serial, dtype=0, username=None, password=None, debug=False):
     main_remote.rport = MAIN_PORT
 
     if dtype > 0:
-        auth = get_auth(username, key, nonce)
+        auth = get_auth(username, key, nonce, randsalt)
 
     res = main_remote.request(
         f"/device/{serial}/relay-channel",

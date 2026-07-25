@@ -151,7 +151,7 @@ sequenceDiagram
   C1-->>A: ;
 
   A->>C1: /info/device/{SN}
-  C1-->>A: [randsalt]
+  C1-->>A: encrypted device info
 
   A->>B: /online/relay
   B-->>A: relay info
@@ -178,6 +178,30 @@ sequenceDiagram
 ```
 
 _Note_: Both connections marked with `(*)` and all subsequent connections to the device must use the same UDP local port.
+
+### Device info and the salt
+
+`/info/device/{SN}` answers with the device's service ports and its password salt, wrapped in an `<Info>` element:
+
+```xml
+<body><DevVersion>6.7.11</DevVersion><Info>sJRI1JVcQjAKP/skwV5WD6+E9B+t...</Info></body>
+```
+
+The payload is base64 over AES-256-OFB. Unlike the per-session key used for `LocalAddr` encryption, this key and IV are fixed and shared by every device, so the payload decrypts to plain JSON:
+
+```json
+{
+  "httpport": 80,
+  "privport": 37777,
+  "randsalt": "5daf91fc5cfc1be8e081cfb08f792726",
+  "rtspport": 554,
+  "tlsprivport": 37778
+}
+```
+
+`randsalt` is the realm for the device password hash — `MD5("{username}:Login to {randsalt}:{password}")` — and is echoed back as `<RandSalt>` when authenticating the channel setup. It differs per device, so it has to be read from here rather than hardcoded.
+
+Firmware that does not report its info answers with an empty `<Info></Info>`. Those devices have no salt: the hash realm collapses to `Login to `, and `<RandSalt>` is omitted from the auth body entirely.
 
 ### PTCP protocol
 
@@ -259,4 +283,5 @@ Packet types:
 This project has been inspired and influenced by the following projects and people:
 
 - [mcw0/PoC](https://github.com/mcw0/PoC): The foundational structure for the handshake and the PTCP protocol.
-- [@p2p-sys](https://github.com/p2p-sys): The idea of inverting the STUN protocol.
+- [@p2p-sys](https://github.com/p2p-sys): The idea of inverting the STUN protocol, and finding the salt in the `/info/device` response in #13.
+- [@mlebdd](https://github.com/mlebdd): Identified the `<Info>` payload as AES-OFB in #13.
