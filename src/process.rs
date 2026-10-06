@@ -121,36 +121,42 @@ pub async fn dh_reader(
     loop {
         let packet = socket.ptcp_read().await;
         last_rx.store(now_secs(), Ordering::Relaxed);
-        let packet = session.lock().unwrap().recv(packet);
 
         if let PTCPBody::Empty = packet.body {
+            session.lock().unwrap().recv_ordered(packet);
             continue;
         }
 
+        let ready = session.lock().unwrap().recv_ordered(packet);
+
+        // Ack every non-empty packet, duplicates and early ones included, so
+        // the device learns our real receive offset and stops retransmitting.
         let p = session.lock().unwrap().send(PTCPBody::Empty);
         socket.ptcp_request(p).await;
 
-        match packet.body {
-            PTCPBody::Status(realm, status) => {
-                if status.starts_with("CONN") {
-                    if let Some(tx) = conn_channels.lock().unwrap().remove(&realm) {
-                        let _ = tx.send(true);
+        for packet in ready {
+            match packet.body {
+                PTCPBody::Status(realm, status) => {
+                    if status.starts_with("CONN") {
+                        if let Some(tx) = conn_channels.lock().unwrap().remove(&realm) {
+                            let _ = tx.send(true);
+                        }
+                    } else if status.starts_with("DISC") {
+                        // Dropping the sender ends process_writer, closing the client.
+                        channels.lock().unwrap().remove(&realm);
+                        conn_channels.lock().unwrap().remove(&realm);
                     }
-                } else if status.starts_with("DISC") {
-                    // Dropping the sender ends process_writer, closing the client.
-                    channels.lock().unwrap().remove(&realm);
-                    conn_channels.lock().unwrap().remove(&realm);
                 }
-            }
-            PTCPBody::Payload(p) => {
-                let tx = channels.lock().unwrap().get(&p.realm).cloned();
+                PTCPBody::Payload(p) => {
+                    let tx = channels.lock().unwrap().get(&p.realm).cloned();
 
-                match tx {
-                    Some(tx) if tx.send(p.data).await.is_ok() => {}
-                    _ => println!("Realm {:08x} unavailable", p.realm),
+                    match tx {
+                        Some(tx) if tx.send(p.data).await.is_ok() => {}
+                        _ => println!("Realm {:08x} unavailable", p.realm),
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
     }
 }

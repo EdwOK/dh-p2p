@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use std::cmp;
+use std::collections::BTreeMap;
 use tokio::net::UdpSocket;
 
 pub enum PTCPEvent {
@@ -231,12 +232,19 @@ impl PTCPPacket {
     }
 }
 
+/// Out-of-order packets held back at most; beyond this the gap is skipped.
+const MAX_PENDING: usize = 64;
+
 pub struct PTCPSession {
     sent: u32,
     recv: u32,
     count: u32,
     id: u32,
     rmid: u32,
+    /// Whether `recv` has been aligned to the device's stream offset.
+    aligned: bool,
+    /// Packets that arrived ahead of `recv`, keyed by their stream offset.
+    pending: BTreeMap<u32, PTCPPacket>,
 }
 
 impl PTCPSession {
@@ -247,6 +255,8 @@ impl PTCPSession {
             count: 0,
             id: 0,
             rmid: 0,
+            aligned: false,
+            pending: BTreeMap::new(),
         }
     }
 
@@ -288,6 +298,68 @@ impl PTCPSession {
 
         packet
     }
+
+    /// Like `recv`, but uses the packet's stream offset (`sent`) so that
+    /// retransmitted duplicates are dropped and reordered packets are
+    /// delivered in order. Returns the packets that are ready to process, in
+    /// order; empty when the packet was a duplicate or arrived early.
+    ///
+    /// The relay retransmits and reorders packets, so blindly adding every
+    /// body length (as `recv` does) overstates what was received and hands
+    /// duplicate payload to clients.
+    pub fn recv_ordered(&mut self, packet: PTCPPacket) -> Vec<PTCPPacket> {
+        self.rmid = packet.lmid;
+
+        // Sync and pure acks carry no stream data; the device does not count
+        // its own Sync either.
+        let len = packet.body.len() as u32;
+        if len == 0 || matches!(packet.body, PTCPBody::Sync) {
+            return vec![packet];
+        }
+
+        if !self.aligned {
+            self.recv = packet.sent;
+            self.aligned = true;
+        }
+
+        let ahead = packet.sent.wrapping_sub(self.recv) as i32;
+        if ahead < 0 {
+            println!(
+                "PTCP duplicate at {} (expected {}), dropped",
+                packet.sent, self.recv
+            );
+            return Vec::new();
+        }
+        if ahead > 0 {
+            println!(
+                "PTCP gap: got {} (expected {}), holding",
+                packet.sent, self.recv
+            );
+            self.pending.insert(packet.sent, packet);
+            if self.pending.len() <= MAX_PENDING {
+                return Vec::new();
+            }
+            // The missing packet is not coming back; skip to what we have.
+            let first = *self.pending.keys().next().unwrap();
+            println!("PTCP resync: skipping {} -> {}", self.recv, first);
+            self.recv = first;
+        } else {
+            self.pending.insert(packet.sent, packet);
+        }
+
+        let mut ready = Vec::new();
+        while let Some(p) = self.pending.remove(&self.recv) {
+            self.recv = self.recv.wrapping_add(p.body.len() as u32);
+            ready.push(p);
+        }
+
+        // Drop held packets that are now behind the stream.
+        let recv = self.recv;
+        self.pending
+            .retain(|&offset, _| (offset.wrapping_sub(recv) as i32) > 0);
+
+        ready
+    }
 }
 
 #[async_trait]
@@ -321,5 +393,94 @@ impl PTCP for UdpSocket {
         println!("---");
 
         packet
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn payload(sent: u32, byte: u8) -> PTCPPacket {
+        PTCPPacket {
+            sent,
+            recv: 0,
+            pid: 0,
+            lmid: 0,
+            rmid: 0,
+            body: PTCPBody::Payload(PTCPPayload {
+                realm: 1,
+                data: vec![byte; 4],
+            }),
+        }
+    }
+
+    fn sync() -> PTCPPacket {
+        PTCPPacket {
+            sent: 0,
+            recv: 0,
+            pid: 0x0002ffff,
+            lmid: 0,
+            rmid: 0,
+            body: PTCPBody::Sync,
+        }
+    }
+
+    fn bytes(ready: &[PTCPPacket]) -> Vec<u8> {
+        ready
+            .iter()
+            .filter_map(|p| match &p.body {
+                PTCPBody::Payload(p) => Some(p.data[0]),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Each payload here is 4 data bytes + 12 header bytes = 16 stream bytes.
+
+    #[test]
+    fn delivers_in_order_and_aligns_to_first_offset() {
+        let mut s = PTCPSession::new();
+        assert_eq!(bytes(&s.recv_ordered(payload(100, 1))), vec![1]);
+        assert_eq!(bytes(&s.recv_ordered(payload(116, 2))), vec![2]);
+        assert_eq!(s.recv, 132);
+    }
+
+    #[test]
+    fn drops_duplicates() {
+        let mut s = PTCPSession::new();
+        s.recv_ordered(payload(0, 1));
+        assert!(s.recv_ordered(payload(0, 1)).is_empty());
+        assert_eq!(s.recv, 16);
+    }
+
+    #[test]
+    fn reorders_early_packets() {
+        let mut s = PTCPSession::new();
+        s.recv_ordered(payload(0, 1));
+        assert!(s.recv_ordered(payload(32, 3)).is_empty());
+        assert_eq!(bytes(&s.recv_ordered(payload(16, 2))), vec![2, 3]);
+        assert_eq!(s.recv, 48);
+    }
+
+    #[test]
+    fn sync_does_not_advance_offset() {
+        let mut s = PTCPSession::new();
+        s.recv_ordered(payload(0, 1));
+        s.recv_ordered(sync());
+        assert_eq!(bytes(&s.recv_ordered(payload(16, 2))), vec![2]);
+        assert_eq!(s.recv, 32);
+    }
+
+    #[test]
+    fn skips_a_gap_that_never_fills() {
+        let mut s = PTCPSession::new();
+        s.recv_ordered(payload(0, 1));
+        // 16 is lost; 32.. keep arriving until the hold buffer overflows.
+        let mut delivered = Vec::new();
+        for i in 0..=MAX_PENDING as u32 {
+            delivered.extend(bytes(&s.recv_ordered(payload(32 + i * 16, 2))));
+        }
+        assert_eq!(delivered.len(), MAX_PENDING + 1);
+        assert!(s.pending.is_empty());
     }
 }
