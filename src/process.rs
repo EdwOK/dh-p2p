@@ -1,6 +1,9 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -8,6 +11,7 @@ use tokio::{
     sync::{mpsc, oneshot},
 };
 
+use crate::now_secs;
 use crate::ptcp::{PTCPBody, PTCPEvent, PTCPPayload, PTCPSession, PTCP};
 
 /**
@@ -17,13 +21,14 @@ pub async fn process_writer(
     mut writer: tokio::net::tcp::OwnedWriteHalf,
     mut rx: mpsc::Receiver<Vec<u8>>,
 ) {
-    loop {
-        let data = rx.recv().await.unwrap();
+    // The channel closes when the device disconnects the realm.
+    while let Some(data) = rx.recv().await {
         if writer.write_all(&data).await.is_err() {
             println!("Writer: Socket closed by peer.");
             break;
         }
     }
+    let _ = writer.shutdown().await;
 }
 
 /**
@@ -41,7 +46,7 @@ pub async fn process_reader(
             Ok(n) => {
                 if n == 0 {
                     println!("Reader: Socket closed by peer.");
-                    dh_tx.send(PTCPEvent::Disconnect(realm_id)).await.unwrap();
+                    let _ = dh_tx.send(PTCPEvent::Disconnect(realm_id)).await;
                     break;
                 }
 
@@ -49,15 +54,18 @@ pub async fn process_reader(
             }
             Err(e) => {
                 println!("Reader: {}", e);
-                dh_tx.send(PTCPEvent::Disconnect(realm_id)).await.unwrap();
+                let _ = dh_tx.send(PTCPEvent::Disconnect(realm_id)).await;
                 break;
             }
         };
 
-        dh_tx
+        if dh_tx
             .send(PTCPEvent::Data(realm_id, buf[0..n].to_vec()))
             .await
-            .unwrap();
+            .is_err()
+        {
+            break;
+        }
     }
 }
 
@@ -68,17 +76,14 @@ pub async fn dh_writer(
     session: Arc<Mutex<PTCPSession>>,
     socket: Arc<UdpSocket>,
     mut dh_rx: mpsc::Receiver<PTCPEvent>,
-    remote_port: u32,
 ) {
-    loop {
-        let ev = dh_rx.recv().await.unwrap();
-
+    while let Some(ev) = dh_rx.recv().await {
         match ev {
             PTCPEvent::Heartbeat => {
                 let p = session.lock().unwrap().send(PTCPBody::Heartbeat);
                 socket.ptcp_request(p).await;
             }
-            PTCPEvent::Connect(realm) => {
+            PTCPEvent::Connect(realm, remote_port) => {
                 let p = session
                     .lock()
                     .unwrap()
@@ -111,9 +116,11 @@ pub async fn dh_reader(
     socket: Arc<UdpSocket>,
     channels: Arc<Mutex<HashMap<u32, mpsc::Sender<Vec<u8>>>>>,
     conn_channels: Arc<Mutex<HashMap<u32, oneshot::Sender<bool>>>>,
+    last_rx: Arc<AtomicU64>,
 ) {
     loop {
         let packet = socket.ptcp_read().await;
+        last_rx.store(now_secs(), Ordering::Relaxed);
         let packet = session.lock().unwrap().recv(packet);
 
         if let PTCPBody::Empty = packet.body {
@@ -125,21 +132,22 @@ pub async fn dh_reader(
 
         match packet.body {
             PTCPBody::Status(realm, status) => {
-                if status == "CONN" {
-                    conn_channels
-                        .lock()
-                        .unwrap()
-                        .remove(&realm)
-                        .unwrap()
-                        .send(true)
-                        .unwrap();
+                if status.starts_with("CONN") {
+                    if let Some(tx) = conn_channels.lock().unwrap().remove(&realm) {
+                        let _ = tx.send(true);
+                    }
+                } else if status.starts_with("DISC") {
+                    // Dropping the sender ends process_writer, closing the client.
+                    channels.lock().unwrap().remove(&realm);
+                    conn_channels.lock().unwrap().remove(&realm);
                 }
             }
             PTCPBody::Payload(p) => {
-                let tx = channels.lock().unwrap().get(&p.realm).unwrap().clone();
+                let tx = channels.lock().unwrap().get(&p.realm).cloned();
 
-                if tx.send(p.data).await.is_err() {
-                    println!("Realm {:08x} unavailable", p.realm);
+                match tx {
+                    Some(tx) if tx.send(p.data).await.is_ok() => {}
+                    _ => println!("Realm {:08x} unavailable", p.realm),
                 }
             }
             _ => {}

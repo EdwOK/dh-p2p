@@ -4,7 +4,8 @@ use tokio::net::UdpSocket;
 
 pub enum PTCPEvent {
     Heartbeat,
-    Connect(u32),
+    /// (realm, remote port)
+    Connect(u32, u32),
     Disconnect(u32),
     Data(u32, Vec<u8>),
 }
